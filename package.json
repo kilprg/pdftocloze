@@ -14,16 +14,17 @@
   "contributes": {
     "commands": [
       {
-        "command": "pdftocloze.helloWorld",
-        "title": "Hello World"
+        "command": "extension.pdftocloze.load",
+        "title": "Load PDF with PDF to Anki cloze"
       },
       {
-        "command": "extension.pdftocloze",
-        "title": "Load PDF with PDF to Anki cloze"
+        "command": "extension.pdftocloze.open",
+        "title": "Open PDF to Anki cloze panel"
       }
     ],
     "activationEvents": [
-      "onCommand:extension.pdftocloze"
+      "onCommand:extension.pdftocloze.load",
+      "onCommand:extension.pdftocloze.open"
     ]
   },
   "scripts": {

@@ -1,6 +1,5 @@
 import { Config, Level, VsCodeApi } from "./constants"
 
-
 export async function add_row(element: HTMLElement) {
 	const dialog = document.createElement('dialog')
 	dialog.innerHTML = `
@@ -55,6 +54,20 @@ export function post_re(element: HTMLElement, vscode: VsCodeApi) {
 		command: cmd,
 		params: input
 	})
+}
+
+export function join_lines(element: HTMLElement, vscode: VsCodeApi) {
+	while (element && element.nodeName.toLowerCase() !== 'table')
+		element = element.previousElementSibling as HTMLElement
+	const cmd = `${element.id}.join`
+	vscode.postMessage({command: cmd})
+}
+
+export function lists(element: HTMLElement, vscode: VsCodeApi) {
+	while (element && element.nodeName.toLowerCase() !== 'table')
+		element = element.previousElementSibling as HTMLElement
+	const cmd = `${element.id}.lists`
+	vscode.postMessage({command: cmd})
 }
 
 export function save(vscode: VsCodeApi) {
