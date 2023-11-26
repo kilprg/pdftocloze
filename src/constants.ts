@@ -1,3 +1,5 @@
+import * as vscode from 'vscode'
+
 export interface VsCodeApi {
     postMessage(message: any): void
     setState(state: any): void
@@ -14,6 +16,7 @@ export interface Config {
 	text: Regex[]
 	options: Regex[]
 	answer: Regex[]
+	uri?: vscode.Uri
 }
 
 export interface Message {

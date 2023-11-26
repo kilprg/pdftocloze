@@ -39,14 +39,20 @@ export function activate(ctx: vscode.ExtensionContext) {
 
 /** Select, convert and load PDF, loading configuration and setting up interface as needed */
 async function load() {
-	const file = (await vscode.window.showOpenDialog({
+	const opts: vscode.OpenDialogOptions = {
 		canSelectMany: false,
 		openLabel: 'Open',
 		filters: {
 			'PDF files': ['pdf']
 		}
-	}))?.[0].fsPath
-	if (!file) return
+	}
+	const cfg = context.globalState.get(KEY) as Config
+	if (cfg && cfg.uri) opts.defaultUri = cfg.uri
+	const uri = await vscode.window.showOpenDialog(opts)
+	if (!uri) return
+	cfg.uri = uri[0]
+	context.globalState.update(KEY, cfg)
+	const file = uri[0].fsPath
 
 	const txt = await convert(file)
 	if (!txt) return
@@ -81,22 +87,22 @@ function listener(msg: Message): void {
 	vscode.window.showInformationMessage(`${msg.command}: ${msg.params?.join(', ')}`)
 	switch (msg.command) {
 		case 'document.re':
-			document_re(controls(msg.params![0]), controls(msg.params![1]))
+			re('document', controls(msg.params![0]), controls(msg.params![1]))
 			break
 		case 'item.re':
-			item_re(controls(msg.params![0]), controls(msg.params![1]))
+			re('item', controls(msg.params![0]), controls(msg.params![1]))
 			break
 		case 'question.re':
-			qa_re('question', controls(msg.params![0]), controls(msg.params![1]))
+			re('question', controls(msg.params![0]), controls(msg.params![1]))
 			break
 		case 'answer.re':
-			qa_re('answer', controls(msg.params![0]), controls(msg.params![1]))
+			re('answer', controls(msg.params![0]), controls(msg.params![1]))
 			break
 		case 'text.re':
-			text_options_re('text', controls(msg.params![0]), controls(msg.params![1]))
+			re('text', controls(msg.params![0]), controls(msg.params![1]))
 			break
 		case 'options.re':
-			text_options_re('options', controls(msg.params![0]), controls(msg.params![1]))
+			re('options', controls(msg.params![0]), controls(msg.params![1]))
 			break
 		case 'save':
 			save(msg.params![0] as Config)
@@ -104,145 +110,214 @@ function listener(msg: Message): void {
 		case 'cloze':
 			cloze()
 			break
-		}
+	}
 }
-
 
 /** Fix control chars */
 function controls(str: string): string {
-    return str
-        .replace(/\\n/g, '\n') // Newline
-        .replace(/\\t/g, '\t') // Tab
-        .replace(/\\r/g, '\r') // Carriage return
-        .replace(/\\b/g, '\b') // Backspace
-        .replace(/\\f/g, '\f') // Form feed
-        .replace(/\\v/g, '\v') // Vertical tab
-        .replace(/\\\\/g, '\\'); // Backslash
+	return str
+		.replace(/\\n/g, '\n') // Newline
+		.replace(/\\t/g, '\t') // Tab
+		.replace(/\\r/g, '\r') // Carriage return
+		.replace(/\\b/g, '\b') // Backspace
+		.replace(/\\f/g, '\f') // Form feed
+		.replace(/\\v/g, '\v') // Vertical tab
+		.replace(/\\\\/g, '\\'); // Backslash
 }
 
 /** Replace in supplied string, tries to interpret as regex (`/some [tT]hing/g`), otherwise replaces as a string */
-function replace(str: string, regex: string, replacement: string): string {
+function sreplace(str: string, regex: string, replacement: string): string {
 	const match = regex.match(/\/(.*)\/([gimuy]*)/)
 	return match
 		? str.replace(new RegExp(match[1], match[2]), replacement)
 		: str.replace(regex, replacement)
 }
 
-/** Split supplied text into items (***) */
-function split_items(str: string): string[] {
-	return str.split(/\s*^[ \t]*[*]{3,}[ \t]*$\s*/gm)
+interface Item {
+	item: string
+	question: string
+	text?: string
+	options?: string
+	answer?: string
 }
 
-/** Split supplied text into question and answer (===) */
-function split_question(str: string): string[] {
-	const match = str.match(/\s*^[ \t]*[=]{3,}[ \t]*$\s*/m)
-	if (match)
-		return [str.slice(0, match.index), str.slice(match.index! + match[0].length)]
-	return [str]
-}
-
-/** Split supplied text into question text and options (---) */
-function split_text_options(str: string): string[] {
-	const match = str.match(/\s*^[ \t]*[-]{3,}[ \t]*$\s*/m)
-	if (match)
-		return [str.slice(0, match.index), str.slice(match.index! + match[0].length)]
-	return [str]
-	return str.split(/\s*^[ \t]*[-]{3,}[ \t]*$\s*/gm)
-}
-
-
-/** Run replacement on entire document */
-function document_re(regex: string, repl: string): void {
-	const doc = editor?.document
-	if (doc) {
-		const txt = doc.getText()
-		const rng = new vscode.Range(doc.positionAt(0), doc.positionAt(txt.length))
-		editor.edit(build => {
-			build.replace(rng, replace(txt, regex, repl))
-		})
+/** Splits string into Item[] */
+function split_doc(str: string): Item[] {
+	const items: Item[] = []
+	for (const item of str.split(/(?<=\S)\s*^[ \t]*[*]{3,}[ \t]*$\s*/gm)) {
+		const itm: Item = {item: item, question: item}
+		const m = itm.item.match(/\s*^[ \t]*[=]{3,}[ \t]*$\s*/m)
+		if (m) {
+			itm.question = itm.item.slice(0, m.index)
+			itm.answer = itm.item.slice(m.index! + m[0].length)
+			const mm = itm.question.match(/\s*^[ \t]*[-]{3,}[ \t]*$\s*/m)
+			if (mm) {
+				itm.text = itm.question.slice(0, mm.index)
+				itm.options = itm.question.slice(mm.index! + mm[0].length)
+			}
+		} else {
+			const mm = itm.question.match(/\s*^[ \t]*[-]{3,}[ \t]*$\s*/m)
+			if (mm) {
+				itm.text = itm.question.slice(0, mm.index)
+				itm.options = itm.question.slice(mm.index! + mm[0].length)
+			}
+		}
+		items.push(itm)
 	}
+	return items
 }
 
-function item_re(regex: string, repl: string): void {
+/** Replace specified level with callback return */
+function lreplace(level: Level, callback: (str: string) => string) {
 	const doc = editor?.document
 	if (doc) {
 		const txt = doc.getText()
 		const rng = new vscode.Range(doc.positionAt(0), doc.positionAt(txt.length))
 		editor.edit(build => {
-			build.replace(
-				rng,
-				split_items(txt)
-					.map(txt => replace(txt, regex, repl))
-					.join(`\n\n${ITEM_SEP}\n\n`)
-			)
-		})
-	}
-}
-
-/** Run regex on question or answer part */
-function qa_re(part: 'question'|'answer', regex: string, repl: string): void {
-	const doc = editor?.document
-	if (doc) {
-		const txt = doc.getText()
-		const rng = new vscode.Range(doc.positionAt(0), doc.positionAt(txt.length))
-		editor.edit(build => {
-			build.replace(
-				rng,
-				split_items(txt)
-				.map(item => {
-					const qa = split_question(item)
-					if (qa.length > 1) { // only on items with q & a
-						return (
-							part === 'question'
-								? [replace(qa[0], regex, repl), qa[1]]
-								: [qa[0], replace(qa[1], regex, repl)]
-						)
-						.join(`\n\n${ANSWER_SEP}\n\n`)
+			let result: string = ''
+			if (level === 'document') {
+				build.replace(rng, callback(txt))
+			} else {
+				const items = split_doc(txt)
+				if (level === 'item') {
+					for (const item of items)
+						item.item = callback(item.item)
+				} else if (level === 'question') {
+					for (const item of items) {
+						item.item = callback(item.question)
+						if (item.answer)
+							item.item += `\n\n${ANSWER_SEP}\n\n${item.answer}`
 					}
-					return item
-				})
-				.join(`\n\n${ITEM_SEP}\n\n`)
-			)
+				} else if (level === 'answer') {
+					for (const item of items) {
+						if (item.answer) {
+							item.answer = callback(item.answer)
+							item.item = `${item.question}\n\n${ANSWER_SEP}\n\n${item.answer}`
+						}
+					}
+				} else if (level === 'text') {
+					for (const item of items) {
+						if (item.text) {
+							item.text = callback(item.text)
+							item.item = item.text
+							if (item.options)
+								item.item += `\n\n${OPTIONS_SEP}\n\n${item.options}`
+							if (item.answer)
+								item.item += `\n\n${ANSWER_SEP}\n\n${item.answer}`
+						}
+					}
+				} else if (level === 'options') {
+					for (const item of items) {
+						if (item.options) {
+							item.options = callback(item.options)
+							item.item = item.text
+								? `${item.text}\n\n${OPTIONS_SEP}\n\n`
+								: ''
+							item.item += item.options
+							if (item.answer)
+								item.item += `\n\n${ANSWER_SEP}\n\n${item.answer}`
+						}
+					}
+				}
+				build.replace(
+					rng,
+					items.map(item => item.item)
+						.join(`\n\n${ITEM_SEP}\n\n`)
+				)
+			}
 		})
 	}
 }
 
-/** Run regex on question text or options part */
-function text_options_re(part: 'text'|'options', regex: string, repl: string): void {
+function join(level: Level): void {
+	lreplace(level, join_)
+
+	function join_(txt: string): string {
+		let result = ''
+		const lines = txt.split(/[ \t]*\n[ \t]*/)
+		for (let i = 0; i < lines.length - 1; i++) {
+			const n = lines[i].lastIndexOf(' ')
+			if (n > 60) {
+				result += `${lines[i]} ${lines[i + 1]}`
+				i++
+			} else {
+				result += `${lines[i]}\n`
+			}
+		}
+		result = result.replace(/\n{3,}/g, '\n\n')
+		return result
+	}
+}
+
+/** Run replacement on entire or part of document */
+function re(level: Level, regex: string, repl: string): void {
+	lreplace(level, re_)
+	function re_(txt: string): string {
+		return sreplace(txt, regex, repl)
+	}
 	const doc = editor?.document
 	if (doc) {
 		const txt = doc.getText()
 		const rng = new vscode.Range(doc.positionAt(0), doc.positionAt(txt.length))
 		editor.edit(build => {
-			build.replace(
-				rng,
-				split_items(txt)
-				.map(item => {
-					const qa = split_question(item)
-					const to = split_text_options(qa[0])
-					if (to.length > 1) { // only on questions with t & o
-						return [
-							(
-								part === 'text'
-									? [replace(to[0], regex, repl), to[1]]
-									: [to[0], replace(to[1], regex, repl)]
-							).join(`\n\n${OPTIONS_SEP}\n\n`),
-							qa[1] || ''
-						].join(`\n\n${ANSWER_SEP}\n\n`)
+			if (level === 'document') {
+				build.replace(rng, sreplace(txt, regex, repl))
+			} else {
+				const items = split_doc(txt)
+				if (level === 'item') {
+					for (const item of items)
+						item.item = sreplace(item.item, regex, repl)
+				} else if (level === 'question') {
+					for (const item of items) {
+						item.item = sreplace(item.question, regex, repl)
+						if (item.answer)
+							item.item += `\n\n${ANSWER_SEP}\n\n${item.answer}`
 					}
-					return item
-				})
-				.join(`\n\n${ITEM_SEP}\n\n`)
-			)
+				} else if (level === 'answer') {
+					for (const item of items) {
+						if (item.answer) {
+							item.answer = sreplace(item.answer, regex, repl)
+							item.item = `${item.question}\n\n${ANSWER_SEP}\n\n${item.answer}`
+						}
+					}
+				} else if (level === 'text') {
+					for (const item of items) {
+						if (item.text) {
+							item.text = sreplace(item.text, regex, repl)
+							item.item = item.text
+							if (item.options)
+								item.item += `\n\n${OPTIONS_SEP}\n\n${item.options}`
+							if (item.answer)
+								item.item += `\n\n${ANSWER_SEP}\n\n${item.answer}`
+						}
+					}
+				} else if (level === 'options') {
+					for (const item of items) {
+						if (item.options) {
+							item.options = sreplace(item.options, regex, repl)
+							item.item = item.text
+								? `${item.text}\n\n${OPTIONS_SEP}\n\n`
+								: ''
+							item.item += item.options
+							if (item.answer)
+								item.item += `\n\n${ANSWER_SEP}\n\n${item.answer}`
+						}
+					}
+				}
+				build.replace(
+					rng,
+					items.map(item => item.item)
+						.join(`\n\n${ITEM_SEP}\n\n`)
+				)
+			}
 		})
 	}
 }
+
 
 /** Load configuration (regexes etc) from persistent storage and set up panel HTML */
 function load_panel(): string {
 	const cfg = context.globalState.get(KEY) as Config || { document: [], item: [], question: [], text: [], options: [], answer: [] }
-	//const cfg = { document: [], item: [], question: [], text: [], options: [], answer: [] }
-	vscode.window.showInformationMessage('>>>>' + JSON.stringify(cfg))
 	const uri = panel.webview.asWebviewUri(
 		vscode.Uri.joinPath(context.extensionUri, 'out', 'webview.js')
 	)
@@ -281,11 +356,10 @@ function load_panel(): string {
 			</html>
 	`
 
-	vscode.window.showInformationMessage(html)
+	//vscode.window.showInformationMessage(html)
 	return html
 
 	function level(section: Level, items: Regex[]): string {
-		vscode.window.showInformationMessage('>>' + JSON.stringify(items))
 		let result = `<table id="${section}">`
 		for (const { title, regex, replacement } of items) {
 			result += `
@@ -308,7 +382,6 @@ function load_panel(): string {
 
 /** Persist config */
 function save(data: Config): void {
-	vscode.window.showInformationMessage('saving: ' + JSON.stringify(data))
 	context.globalState.update(KEY, data)
 }
 
@@ -318,37 +391,34 @@ function cloze(): void {
 	if (doc) {
 		const txt = doc.getText()
 		const rng = new vscode.Range(doc.positionAt(0), doc.positionAt(txt.length))
+		const items = split_doc(txt)
 		editor.edit(build => {
-			for (const item of split_items(txt)) {
-				const qa = split_question(item)
-				const to = split_text_options(qa[0])
-				if (to.length > 1) {
-					//
-
+			for (let i = 0; i < items.length; i++) {
+				items[i].item = ''
+				if (items[i].text || items[i].options) {
+					if (items[i].text)
+						items[i].item += `${items[i].text!.trim()}\n\n`
+					if (items[i].options)
+						items[i].item += `**Alternativ**  \n${items[i]!.options!.trim()}\n\n`
 				} else {
-
+					items[i].item = `${items[i].question.trim()}\n\n`
 				}
+
+				items[i].item += `{{c${i}::`
+				if (items[i].answer) {
+					items[i].item += `  \n${items[i].answer!.trim()}  \n`
+				} else {
+					if (items[i].options) {
+						items[i].item += `  \nitems[i].options!.trim()  \n`
+					} else {
+						items[i].item += '\n\n'
+					}
+				}
+				items[i].item += '}}'
 			}
 			build.replace(
 				rng,
-				split_items(txt)
-				.map(item => {
-					const qa = split_question(item)
-					if (qa.length > 1) { // only on items with q & a
-						const to = split_text_options(qa[0])
-						if (to.length > 1) { // only on questions with t & o
-							return [
-								(
-									part === 'text'
-										? [replace(to[0], regex, repl), to[1]]
-										: [to[0], replace(to[1], regex, repl)]
-								).join(`\n\n${OPTIONS_SEP}\n\n`),
-								qa[1]
-							].join(`\n\n${ANSWER_SEP}\n\n`)
-						}
-					}
-					return item
-				})
+				items.map(item => item.item.trim())
 				.join(`\n\n${ITEM_SEP}\n\n`)
 			)
 		})
