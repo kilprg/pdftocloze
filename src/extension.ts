@@ -1,25 +1,22 @@
 import * as vscode from 'vscode'
 import * as util from 'util'
-import * as path from 'path'
 import { exec as exec_ } from 'child_process'
 import { Level, Regex, Config, Message, ROMAN_MAP } from './constants'
 
-/**
- * REMAINS
- * - Create panel HTML
- *   - Regexes at document level
- *   - Split to question
- *   - Regexes at question level
- *   - Split question to q/a
- *   - Regexes at q level
- *   - Split q to text and options
- *   - Regexes at text level
- *   - Regexes at option level
- *   - Regexes at a level
- *   - Convert to HTML
- *   - Make as ul and then save arrays of regexes and titles w/ add/delete buttons
- * - Implement load/save
- */
+/** Duplicate from webview.ts - can't include correctly */
+export function tr(title: string, regex: string, replacement: string): string {
+	//title = title.replace(/^<.*?>(.*?)<\/button>$/, '$1')
+	return `
+	<td style="width: 1px;white-space: nowrap;padding: 0px;margin: 0px;">
+		<button onclick="post_re(this, vscode)" style="width: 100%; box-sizing: border-box;">${title}</button>
+	</td>
+	<td style="display: flex;padding: 0px; margin: 0px;">
+		<input type="text" style="flex-grow: 2;flex-shrink: 1;margin-right: 10px;box-sizing: border-box;font-family: monospace;font-size: 12px;" value="${regex}">
+		<input type="text" style="flex-grow: 1;flex-shrink: 2;margin-right: 10px;box-sizing: border-box;font-family: monospace; font-size: 12px;" value="${replacement}">
+		<button onclick="del_row(this)">Delete</button>
+	</td>
+	`
+}
 
 const exec = util.promisify(exec_)
 const KEY = 'pdftotext'
@@ -134,7 +131,7 @@ function listener(msg: Message): void {
 			join('options')
 			break
 		case 'options.lists':
-			lists('options')
+			lreplace('options', (str: string) => lists(str, 'markdown'))
 			break
 		case 'save':
 			save(msg.params![0] as Config)
@@ -277,7 +274,7 @@ function join(level: Level): void {
 		let result = ''
 		const lines = txt.split(/[ \t]*\n[ \t]*/)
 		for (let i = 0; i < lines.length - 1; i++) {
-			const n = lines[i].lastIndexOf(' ')
+			const n = lines[i].trim().lastIndexOf(' ')
 			result += `${lines[i]}${n > 60 ? ' ' : '\n'}`
 		}
 		result += lines[lines.length - 1]
@@ -294,62 +291,96 @@ function re(level: Level, regex: string, repl: string): void {
 	}
 }
 
-/** Try to find any lists at the given level */
-function lists(level: Level): void {
-	lreplace(level, replacer)
-	function replacer(txt: string): string {
-		let items = txt.split(/[ \t]*\n[ \t]*(?=(?:[a-m]|[0-9]+|(?:M{0,3})(?:CM|CD|D?C{0,3})(?:XC|XL|L?X{0,3})(?:IX|IV|V?I{0,3}))[.): \t][ \t]*)/gmi)
-		if (items.length < 2) return txt
-		if (items[0][0].toLocaleLowerCase() === 'a') {
-			const a = 'a'.charCodeAt(0)
-			for (let i = 1; i < items.length; i++) {
-				if (items[i][0].toLocaleLowerCase() !== String.fromCharCode(a + i))
-					return txt
-			}
-			return list(items, 'letter')
-		} else if (items[0][0] === '1') {
-			for (let i = 0; i < items.length; i++) {
-				const match = items[i].match(/^\d+/)
-				if (!match || match[0] !== (i + 1).toString())
-					return txt
-			}
-			return list(items, 'number')
-		} else if (items[0][0].toLowerCase() === 'i') {
-			for (let i = 0; i < items.length; i++) {
-				const match = items[i].match(/^(.*?)[.): \t]/)
-				if (!match || match[1].toUpperCase() !== roman(i + 1))
-					return txt
-			}
-			return list(items, 'roman')
+function lists(txt: string, format: 'markdown'|'html'): string {
+	let items = txt.trim().split(/[ \t]*\n[ \t]*(?=(?:[-*]|[a-m]|[0-9]+|(?:M{0,3})(?:CM|CD|D?C{0,3})(?:XC|XL|L?X{0,3})(?:IX|IV|V?I{0,3}))[.): \t][ \t]*)/gmi)
+	if (items.length < 2) return txt
+	if (items[0][0].toLocaleLowerCase() === 'a') {
+		const a = 'a'.charCodeAt(0)
+		for (let i = 1; i < items.length; i++) {
+			if (items[i][0].toLocaleLowerCase() !== String.fromCharCode(a + i))
+				return txt
 		}
+		return list(items, 'letter')
+	} else if (items[0][0] === '1') {
+		for (let i = 0; i < items.length; i++) {
+			const match = items[i].match(/^\d+/)
+			if (!match || match[0] !== (i + 1).toString())
+				return txt
+		}
+		return list(items, 'number')
+	} else if (items[0][0].toLowerCase() === 'i') {
+		for (let i = 0; i < items.length; i++) {
+			const match = items[i].match(/^(.*?)[.): \t]/)
+			if (!match || match[1].toUpperCase() !== roman(i + 1))
+				return txt
+		}
+		return list(items, 'roman')
+	} else {
+		const match = items[0].match(/^[*-●][ ]/)
+		if (match) {
+			for (let i = 1; i < items.length; i++) {
+				if (!items[i].startsWith(match[0]))
+					return txt
+			}
+			return list(items, 'bullet')
+		}
+	}
 
-		return txt
+	return txt
 
-		function list(items: string[], type: 'number'|'letter'|'roman'): string {
-			for (let i = 0; i < items.length; i++) {
-				if (type === 'number')
+	function list(items: string[], type: 'number'|'letter'|'roman'|'bullet'): string {
+		if (format === 'markdown') {
+			if (type === 'number') {
+				for (let i = 0; i < items.length; i++)
 					items[i] = items[i].replace(/([ \t]*\n[ \t]*)+/gm, ' ').trim()
-				else
+			} else if (type === 'bullet') {
+				for (let i = 0; i < items.length; i++)
+					items[i] = '- ' + items[i].slice(1).replace(/([ \t]*\n[ \t]*)+/gm, ' ').trim()
+			} else {
+				for (let i = 0; i < items.length; i++)
 					items[i] = '- ' + items[i].replace(/([ \t]*\n[ \t]*)+/gm, ' ').trim()
-
 			}
 			return items.join('\n')
-		}
-
-		function roman(n: number): string {
-			let rn = ''
-			for (const [value, symbol] of ROMAN_MAP) {
-				while (n >= value) {
-					rn += symbol
-					n -= value
-				}
+		} else {
+			if (type === 'number') {
+				for (let i = 0; i < items.length; i++)
+					items[i] = '<li>' + items[i]
+						.replace(/^\d+[.:) ]/, '')
+						.replace(/([ \t]*\n[ \t]*)+/gm, ' ')
+						.trim() +
+						'</li>'
+			} else if (type === 'bullet') {
+				for (let i = 0; i < items.length; i++)
+					items[i] = '<li>' + items[i]
+						.slice(1)
+						.replace(/([ \t]*\n[ \t]*)+/gm, ' ')
+						.trim() +
+						'</li>'
+			} else {
+				for (let i = 0; i < items.length; i++)
+					items[i] = '<li>' + items[i]
+						.replace(/([ \t]*\n[ \t]*)+/gm, ' ')
+						.trim() +
+						'</li>'
 			}
-		
-			return rn
+			const t = type === 'number' ? 'ol' : 'ul'
+			return `<${t}>${items.join('')}</${t}>`
 		}
+	}
 
+	function roman(n: number): string {
+		let rn = ''
+		for (const [value, symbol] of ROMAN_MAP) {
+			while (n >= value) {
+				rn += symbol
+				n -= value
+			}
+		}
+	
+		return rn
 	}
 }
+
 
 /** Load configuration (regexes etc) from persistent storage and set up panel HTML */
 function load_panel(): string {
@@ -393,26 +424,20 @@ function load_panel(): string {
 			</html>
 	`
 
+	vscode.window.showInformationMessage(html)
 	return html
 
 	function level(section: Level, items: Regex[]): string {
-		let result = `<table id="${section}">`
-		for (const { title, regex, replacement } of items) {
-			result += `
-				<tr>
-					<td style="width: 1px; white-space: nowrap;">${title}</td>
-					<td style="display: flex;">
-						<input type="text" style="flex-grow: 1;flex-shrink: 1;margin-right: 10px;box-sizing: border-box;" value="${regex}">
-						<input type="text" style="flex-grow: 1;flex-shrink: 1;margin-right: 10px;box-sizing: border-box;" value="${replacement}">
-						<button onclick="post_re(this, vscode)">Apply</button>
-						<button onclick="del_row(this)">Delete</button>
-					</td>
-				</tr>
-				`
-		}
-		result += `</table>
-			<button onclick="join_lines(this, vscode)">Join lines</button>
-			<button onclick="add_row(this)">Add row</button>`
+		let result = `<table id="${section}" style="width: 100%;padding: 0px; margin: 0px;">`
+		for (const { title, regex, replacement } of items)
+			result += `<tr>${tr(title, regex, replacement)}</tr>`
+		result += `<tr>
+			<td colspan="2" style="padding: 0px; margin: 0px;">
+				<button onclick="join_lines(this, vscode)">Join lines</button>
+				<button onclick="add_row(this)">Add row</button>
+			</td>
+			</tr>
+			</table>`
 		return result
 	}
 }
@@ -435,21 +460,24 @@ function cloze(): void {
 				items[i].item = ''
 				if (items[i].text || items[i].options) {
 					if (items[i].text)
-						items[i].item += `${hardbreak(items[i].text!)}\n\n`
-					if (items[i].options)
-						items[i].item += `${hardbreak(items[i]!.options!)}\n\n`
+						items[i].item += `${hardbreak(items[i].text!)}`
+					if (items[i].options) {
+						if (items[i].item.length) items[i].item += '<br><br>'
+						items[i].item += lists(items[i]!.options!, 'html')
+					}
+						
 				} else {
-					items[i].item = `${hardbreak(items[i].question)}\n\n`
+					items[i].item = hardbreak(items[i].question)
 				}
 
-				items[i].item += `{{c${i}::`
+				items[i].item += `<br>{{c${i + 1}::`
 				if (items[i].answer) {
-					items[i].item += `  \n${hardbreak(items[i].answer!)}  \n`
+					items[i].item += `${hardbreak(items[i].answer!)}`
 				} else {
 					if (items[i].options) {
-						items[i].item += `  \n${hardbreak(items[i].options!)}  \n`
+						items[i].item += `${lists(items[i].options!, 'html')}`
 					} else {
-						items[i].item += '\n\n'
+						items[i].item += '<br><br>'
 					}
 				}
 				items[i].item += '}}'
@@ -457,14 +485,16 @@ function cloze(): void {
 			build.replace(
 				rng,
 				items.map(item => item.item.trim())
-				.join(`\n\n${ITEM_SEP}\n\n`)
+				.join('<hr>')
+				.replace(/\n/g, '<br>')
 			)
 		})
 	}
+
 }
 
 function hardbreak(str: string): string {
-	return str.trim().replace(/[ \t]*\n(?![ \t]*\n)/, '  \n')
+	return str.trim().replace(/[ \t]*\n/, '<br>')
 }
 
 /** Called when extension is deactivated */
