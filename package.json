@@ -1,51 +1,204 @@
 {
-  "name": "pdftocloze",
-  "displayName": "pdftocloze",
-  "description": "Convert PDF to text and manipulate to create Anki cloze note.",
-  "version": "0.0.1",
-  "engines": {
-    "vscode": "^1.84.0"
-  },
-  "categories": [
-    "Other"
-  ],
-  "activationEvents": [],
-  "main": "./out/extension.js",
-  "contributes": {
-    "commands": [
-      {
-        "command": "extension.pdftocloze.load",
-        "title": "Load PDF with PDF to Anki cloze"
-      },
-      {
-        "command": "extension.pdftocloze.open",
-        "title": "Open PDF to Anki cloze panel"
-      }
-    ],
-    "activationEvents": [
-      "onCommand:extension.pdftocloze.load",
-      "onCommand:extension.pdftocloze.open"
-    ]
-  },
-  "scripts": {
-    "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./",
-    "pretest": "npm run compile && npm run lint",
-    "lint": "eslint src --ext ts",
-    "test": "node ./out/test/runTest.js"
-  },
-  "devDependencies": {
-    "@types/jsdom": "^21.1.6",
-    "@types/mocha": "^10.0.3",
-    "@types/node": "18.x",
-    "@types/vscode": "^1.84.0",
-    "@typescript-eslint/eslint-plugin": "^6.9.0",
-    "@typescript-eslint/parser": "^6.9.0",
-    "@vscode/test-electron": "^2.3.6",
-    "eslint": "^8.52.0",
-    "glob": "^10.3.10",
-    "mocha": "^10.2.0",
-    "typescript": "^5.2.2"
-  }
+	"name": "pdftocloze",
+	"displayName": "pdftocloze",
+	"description": "Convert PDF to text and manipulate to create Anki cloze note.",
+	"version": "2.0.0",
+	"publisher": "triaeiou",
+	"author": {
+		"name": "triaeiou"
+	},
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/triaeiou/pdftocloze.git"
+	},
+	"engines": {
+		"vscode": ">=1.96.4"
+	},
+	"icon": "icon.png",
+	"categories": [
+		"Other",
+		"Formatters"
+	],
+	"keywords": [
+		"cloze",
+		"pdf",
+		"anki",
+		"pdf to cloze",
+		"pdf2cloze",
+		"to cloze"
+	],
+	"activationEvents": [
+		"onCommand:extension.pdftocloze.load_pdf",
+		"onCommand:extension.pdftocloze.open_panel"
+	],
+	"main": "dist/extension.js",
+	"files": [
+		"dist/extension.js",
+		"dist/constants.js",
+		"dist/webview.js",
+		"dist/sedrx.js",
+		"package.json",
+		"LICENSE",
+		"icon.png",
+		"node_modules"
+	],
+	"scripts": {
+		"vscode:prepublish": "npm run build",
+		"build": "tsc",
+		"watch": "tsc -watch",
+		"test": "node ./out/test/runTest.js",
+		"package": "vsce package"
+	},
+	"devDependencies": {
+		"@types/jsdom": "^21.1.7",
+		"@types/markdown-it": "^14.1.2",
+		"@types/node": "22.x",
+		"@types/vscode": ">=1.96.0",
+		"typescript": ">=5.7.3"
+	},
+	"__metadata": {
+		"size": 266688
+	},
+	"dependencies": {
+		"markdown-it": ">=14.1.0"
+	},
+	"contributes": {
+		"commands": [
+			{
+				"command": "extension.pdftocloze.load_pdf",
+				"title": "Load PDF with PDF to Anki cloze"
+			},
+			{
+				"command": "extension.pdftocloze.open_panel",
+				"title": "Open PDF to Anki cloze panel"
+			}
+		],
+		"viewsContainers": {
+			"panel": [
+				{
+					"id": "pdftocloze_regexes",
+					"title": "Regular expressions",
+					"icon": "icon.png"
+				}
+			]
+		},
+		"views": {
+			"pdftocloze_regexes": [
+				{
+					"id": "pdftocloze_regexes_view",
+					"name": "Regex view",
+					"type": "webview"
+				}
+			]
+		},
+		"configuration": {
+			"title": "PDF to cloze",
+			"properties": {
+				"pdftocloze": {
+					"type": "object",
+					"description": "Library of sed-style regular expressions for re-use.",
+					"properties": {
+						"document": {
+							"type": "array",
+							"description": "Array of document-level regexes.",
+							"items": {
+								"type": "object",
+								"properties": {
+									"label": {
+										"type": "string",
+										"description": "Regex label."
+									},
+									"rx": {
+										"type": "string",
+										"description": "Sed-style regular expression (backslashes must be escaped in this json)."
+									}
+								},
+								"required": [
+									"label",
+									"rx"
+								]
+							},
+							"default": []
+						},
+						"items": {
+							"type": "array",
+							"description": "Array of item-level regexes.",
+							"items": {
+								"type": "object",
+								"properties": {
+									"label": {
+										"type": "string",
+										"description": "Regex label."
+									},
+									"rx": {
+										"type": "string",
+										"description": "Sed-style regular expression (backslashes must be escaped in this json)."
+									}
+								},
+								"required": [
+									"label",
+									"rx"
+								]
+							},
+							"default": []
+						},
+						"questions": {
+							"type": "array",
+							"description": "Array of question-level regexes.",
+							"items": {
+								"type": "object",
+								"properties": {
+									"label": {
+										"type": "string",
+										"description": "Regex label."
+									},
+									"rx": {
+										"type": "string",
+										"description": "Sed-style regular expression (backslashes must be escaped in this json)."
+									}
+								},
+								"required": [
+									"label",
+									"rx"
+								]
+							},
+							"default": []
+						},
+						"answers": {
+							"type": "array",
+							"description": "Array of answer-level regexes.",
+							"items": {
+								"type": "object",
+								"properties": {
+									"label": {
+										"type": "string",
+										"description": "Regex label."
+									},
+									"rx": {
+										"type": "string",
+										"description": "Sed-style regular expression (backslashes must be escaped in this json)."
+									}
+								},
+								"required": [
+									"label",
+									"rx"
+								]
+							},
+							"default": []
+						},
+						"last_uri": {
+							"type": "object",
+							"description": "URI of last opened PDF.",
+							"properties": {
+								"$mid": "number",
+								"path": "string",
+								"scheme": "string"
+							}
+						},
+						"default": {}
+					}
+				}
+			}
+		}
+	}
 }

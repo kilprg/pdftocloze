@@ -1,52 +1,55 @@
 import * as vscode from 'vscode'
 import * as util from 'util'
 import { exec as exec_ } from 'child_process'
-import { Level, Regex, Config, Message, ROMAN_MAP } from './constants'
+import {Config, Message, KEY, ITEM_SEP, OPTIONS_SEP, ANSWER_SEP} from './constants.js'
+import {PdfToClozePanelProvider} from './webview.js'
+import MarkdownIt from 'markdown-it'
+import {Rx, sedrx} from './sedrx.js'
 
-/** Duplicate from webview.ts - can't include correctly */
-export function tr(title: string, regex: string, replacement: string): string {
-	//title = title.replace(/^<.*?>(.*?)<\/button>$/, '$1')
-	return `
-	<td style="width: 1px;white-space: nowrap;padding: 0px;margin: 0px;">
-		<button onclick="post_re(this, vscode)" style="width: 100%; box-sizing: border-box;">${title}</button>
-	</td>
-	<td style="display: flex;padding: 0px; margin: 0px;">
-		<input type="text" style="flex-grow: 2;flex-shrink: 1;margin-right: 10px;box-sizing: border-box;font-family: monospace;font-size: 12px;" value="${regex}">
-		<input type="text" style="flex-grow: 1;flex-shrink: 2;margin-right: 10px;box-sizing: border-box;font-family: monospace; font-size: 12px;" value="${replacement}">
-		<button onclick="del_row(this)">Delete</button>
-	</td>
-	`
-}
+/* General idea:
+ * - Document consists of one or more items
+ * - An item may have the following parts, in this order:
+ * 	 1. question - text part of a question
+ * 	 2. options - options to select from, e.g. a/b/c/d
+ *   3. answer - text that is the correct answer (and any explanations)
+ * - On replace action the document is reparsed, performing regex at
+ *   - document level, before any splitting
+ *   - item level
+ *   - question/options/answer level
+ * - On list action
+ * - On cloze action the answer part is enclozed, if it is empty any options are copied into it
+*/
 
+
+/** used to make asynchronify syncronous functions so they are awaitable */
 const exec = util.promisify(exec_)
-const KEY = 'pdftotext'
-const ITEM_SEP = '*************************************************'
-const ANSWER_SEP = '================================================='
-const OPTIONS_SEP = '-------------------------------------------------'
 
+/** Tool panel with regexes etc */
 let panel: vscode.WebviewPanel
 let context: vscode.ExtensionContext
+let config: vscode.WorkspaceConfiguration
+let cfg: Config
 
+/** Run on first call */
 export function activate(ctx: vscode.ExtensionContext) {
 	context = ctx
-	let disposable = vscode.commands.registerCommand('extension.pdftocloze.load', load)
-	context.subscriptions.push(disposable)
-	disposable = vscode.commands.registerCommand('extension.pdftocloze.open', open)
-	context.subscriptions.push(disposable)
+	config = vscode.workspace.getConfiguration()
+	cfg = config.inspect(KEY)?.globalValue as Config || {} as Config
+	const provider = new PdfToClozePanelProvider(context.extensionUri, cfg)
+	context.subscriptions.push(
+		vscode.window.registerWebviewViewProvider(
+			`${KEY}_regexes_view`,
+			provider,
+			{webviewOptions: { retainContextWhenHidden: true }}
+		),
+		vscode.commands.registerCommand(`extension.${KEY}.load_pdf`, load_pdf),
+		vscode.commands.registerCommand(`extension.${KEY}.open_panel`, open_panel)
+	)
 }
 
-async function open() {
-	if (panel)
-		panel.reveal(vscode.ViewColumn.Two)
-	else {
-		panel = vscode.window.createWebviewPanel('htmlPreview', 'PDF to Anki cloze', vscode.ViewColumn.Two, { enableScripts: true })
-		panel.webview.html = load_panel()
-		panel.webview.onDidReceiveMessage(listener, undefined, context.subscriptions)
-	}
-}
 
 /** Select, convert and load PDF, loading configuration and setting up interface as needed */
-async function load() {
+async function load_pdf() {
 	const opts: vscode.OpenDialogOptions = {
 		canSelectMany: false,
 		openLabel: 'Open',
@@ -54,96 +57,119 @@ async function load() {
 			'PDF files': ['pdf']
 		}
 	}
-	const cfg = context.globalState.get(KEY) as Config
-	if (cfg && cfg.uri) opts.defaultUri = cfg.uri
+	// set start dir
+	if (cfg.last_uri) opts.defaultUri = cfg.last_uri
+
 	const uri = await vscode.window.showOpenDialog(opts)
 	if (!uri) return
-	cfg.uri = uri[0]
-	context.globalState.update(KEY, cfg)
-	const file = uri[0].fsPath
 
-	const txt = await convert(file)
+	// store current dir
+	cfg.last_uri = uri[0]
+	await config.update(KEY, cfg, vscode.ConfigurationTarget.Global)
+
+	// convert selected file
+	const file = uri[0].fsPath
+	let txt = await convert(file)
 	if (!txt) return
+
+	// normalize text
+	txt = txt
+		.replace('”', '"')
+		.replace('–', '-')
+		.replace('\r\n', '\n')
+		
+
+
+	// open text as markdown, create or show the tool panel
 	const document = await vscode.workspace.openTextDocument({ language: 'markdown', content: txt })
 	await vscode.window.showTextDocument(document, vscode.ViewColumn.One)
-	if (panel)
-		panel.reveal(vscode.ViewColumn.Two)
-	else {
-		panel = vscode.window.createWebviewPanel('htmlPreview', 'PDF to Anki cloze', vscode.ViewColumn.Two, { enableScripts: true })
-		panel.webview.html = load_panel()
-		panel.webview.onDidReceiveMessage(listener, undefined, context.subscriptions)
-	}
+	await vscode.commands.executeCommand(`${KEY}_regexes_view.focus`)
 }
 
-/** Async convert supplied file to text and return string or undefined. */
+
+async function open_panel() {
+    await vscode.commands.executeCommand(`${KEY}_regexes_view.focus`)
+}
+
+
+/** Async convert supplied pdf file to text using pdftotext and return string or undefined. */
 async function convert(file: string): Promise<string | undefined> {
 	let e
 	try {
 		const command = `pdftotext -layout -nodiag -eol unix -nopgbrk "${file}" -`
 		const { stderr, stdout } = await exec(command)
-		if (stdout && !stderr) return stdout
+		if (stdout && !stderr) return stdout // success
 		e = stderr
 	} catch (error) {
 		e = error
 	}
+
 	vscode.window.showErrorMessage(`Failed to convert PDF: ${e}`)
 	return undefined
 }
 
-/** Listens for postMessage from the WebView panel and executes the appropriate command. */
-function listener(msg: Message): void {
-	//vscode.window.showInformationMessage(`${msg.command}: ${msg.params?.join(', ')}`)
-	switch (msg.command) {
-		case 'document.re':
-			re('document', msg.params![0], controls(msg.params![1]))
-			break
-		case 'item.re':
-			re('item', msg.params![0], controls(msg.params![1]))
-			break
-		case 'question.re':
-			re('question', msg.params![0], controls(msg.params![1]))
-			break
-		case 'answer.re':
-			re('answer', msg.params![0], controls(msg.params![1]))
-			break
-		case 'text.re':
-			re('text', msg.params![0], controls(msg.params![1]))
-			break
-		case 'options.re':
-			re('options', msg.params![0], controls(msg.params![1]))
-			break
-		case 'document.join':
-			join('document')
-			break
-		case 'item.join':
-			join('item')
-			break
-		case 'question.join':
-			join('question')
-			break
-		case 'answer.join':
-			join('answer')
-			break
-		case 'text.join':
-			join('text')
-			break
-		case 'options.join':
-			join('options')
-			break
-		case 'options.lists':
-			lreplace('options', (str: string) => lists(str, 'markdown'))
-			break
-		case 'save':
-			save(msg.params![0] as Config)
-			break
-		case 'cloze':
-			cloze()
-			break
-	}
+
+/** Split a string (the document) into array of item strings */
+function split_to_items(str: string): string[] {
+	return str.split(/^[ \t]*[*]{3,}[ \t]*$/gm).map(s => s.trim()).filter(s => s !== '')
 }
 
-/** Fix control chars */
-function controls(str: string): string {
+
+/** Join list of item strings separated by ITEM_SEP */
+function join_items(items: string[]): string {
+	return items.map(i => i.trim()).join(`\n\n${ITEM_SEP}\n\n`).trim()
+}
+
+
+/** Parts of an item */
+interface Item {
+	question: string
+	options?: string
+	answer?: string
+}
+
+
+/** Split items in an array into their parts */
+function split_to_parts(items: string[]): Item[] {
+	const res: Item[] = []
+	for(const str of items) {
+		// split on options separator
+		const s = str.split(/^[ \t]*[\-]{3,}[ \t]*$/m)
+		const item: Item = {question: s[0].trim()}
+		// no options detected
+		if (s.length === 1) {
+			// split on answer separator
+			const ss = str.split(/^[ \t]*[_]{3,}[ \t]*$/m)
+			item.question = ss[0].trim()
+			item.answer = ss[1]?.trim() || ''
+		// options detected
+		} else {
+			item.question = s[0].trim()
+			// split on answer separator
+			const ss = s[1].split(/^[ \t]*[_]{3,}[ \t]*$/m)
+			item.options = ss[0].trim()
+			item.answer = ss[1]?.trim() || ''
+		}
+		res.push(item)
+	}
+
+	return res
+}
+
+
+/** Join array of items to array of item strings */
+function join_parts(items: Item[]): string[] {
+	return items.map(itm => {
+		let str = itm.question.trim()
+		if (itm.options) str += `\n\n${OPTIONS_SEP}\n\n${itm.options.trim()}`
+		if (itm.answer) str += `\n\n${ANSWER_SEP}\n\n${itm.answer.trim()}`
+		return str.trim()
+	})
+}
+
+
+/** Normalize control chars in replacement string */
+function normalize(str: string): string {
 	return str
 		.replace(/\\n/g, '\n') // Newline
 		.replace(/\\t/g, '\t') // Tab
@@ -154,348 +180,117 @@ function controls(str: string): string {
 		.replace(/\\\\/g, '\\'); // Backslash
 }
 
-/** Replace in supplied string, tries to interpret as regex (`/some [tT]hing/g`), otherwise replaces as a string */
-function sreplace(str: string, regex: string, replacement: string): string {
-	const match = regex.match(/^\/(.*)\/([gimuy]*)$/)
-	if (match) {
-		try {
-			const re = new RegExp(match[1], match[2])
-			return str.replace(new RegExp(match[1], match[2]), replacement)
-		} catch (e: any) {
-			vscode.window.showErrorMessage(e.message)
-			return str
-		}	
-	} else {
-		return str.replace(regex, replacement)
-	}
+
+/** Replace newlines with hard breaks */
+function hard_break(str: string): string {
+	return str.replace(/(\S)[ \t]?\n([ \t]*\S)/gm, '$1  \n$2')
 }
 
-interface Item {
-	item: string
-	question: string
-	text?: string
-	options?: string
-	answer?: string
-}
-
-/** Splits string into Item[] */
-function split_doc(str: string): Item[] {
-	const items: Item[] = []
-	for (const item of str.split(/(?<=\S)\s*^[ \t]*[*]{3,}[ \t]*$\s*/gm)) {
-		const itm: Item = {item: item, question: item}
-		const m = itm.item.match(/\s*^[ \t]*[=]{3,}[ \t]*$\s*/m)
-		if (m) {
-			itm.question = itm.item.slice(0, m.index)
-			itm.answer = itm.item.slice(m.index! + m[0].length)
-			const mm = itm.question.match(/\s*^[ \t]*[-]{3,}[ \t]*$\s*/m)
-			if (mm) {
-				itm.text = itm.question.slice(0, mm.index)
-				itm.options = itm.question.slice(mm.index! + mm[0].length)
-			}
-		} else {
-			const mm = itm.question.match(/\s*^[ \t]*[-]{3,}[ \t]*$\s*/m)
-			if (mm) {
-				itm.text = itm.question.slice(0, mm.index)
-				itm.options = itm.question.slice(mm.index! + mm[0].length)
-			}
-		}
-		items.push(itm)
-	}
-	return items
-}
-
-/** Replace specified level with callback return */
-function lreplace(level: Level, replacer: (str: string) => string) {
+/** Handle interactions from tool panel, listens for postMessage from the WebView panel and executes the appropriate command. */
+export async function listener(msg: Message) {
+	vscode.window.showInformationMessage(`${msg.command}: ${msg.params ? JSON.stringify(msg.params) : '-'}`)
 	const editor = vscode.window.visibleTextEditors[0]
 	const doc = editor?.document
-	if (doc) {
-		const txt = doc.getText()
-		const rng = new vscode.Range(doc.positionAt(0), doc.positionAt(txt.length))
-		editor.edit(build => {
-			if (level === 'document') {
-				build.replace(rng, replacer(txt))
-			} else {
-				const items = split_doc(txt)
-				if (level === 'item') {
-					for (const item of items)
-						item.item = replacer(item.item)
-				} else if (level === 'question') {
-					for (const item of items) {
-						if (!(item.text || item.options)) {
-							item.item = replacer(item.question)
-							if (item.answer)
-								item.item += `\n\n${ANSWER_SEP}\n\n${item.answer}`	
-						}
-					}
-				} else if (level === 'answer') {
-					for (const item of items) {
-						if (item.answer) {
-							item.answer = replacer(item.answer)
-							item.item = `${item.question}\n\n${ANSWER_SEP}\n\n${item.answer}`
-						}
-					}
-				} else if (level === 'text') {
-					for (const item of items) {
-						if (item.text) {
-							item.text = replacer(item.text)
-							item.item = item.text
-							if (item.options)
-								item.item += `\n\n${OPTIONS_SEP}\n\n${item.options}`
-							if (item.answer)
-								item.item += `\n\n${ANSWER_SEP}\n\n${item.answer}`
-						}
-					}
-				} else if (level === 'options') {
-					for (const item of items) {
-						if (item.options) {
-							item.options = replacer(item.options)
-							item.item = item.text
-								? `${item.text}\n\n${OPTIONS_SEP}\n\n`
-								: ''
-							item.item += item.options
-							if (item.answer)
-								item.item += `\n\n${ANSWER_SEP}\n\n${item.answer}`
-						}
-					}
-				}
-				build.replace(
-					rng,
-					items.map(item => item.item).join(`\n\n${ITEM_SEP}\n\n`)
-				)
+	const text = doc?.getText() || ''
+	const rng = new vscode.Range(doc.positionAt(0), doc.positionAt(text.length))
+	let rx: Rx|null
+
+	switch (msg.command) {
+		// replace on entire document
+		case 'document.re': {
+			if (rx = sedrx(msg.params![0]))
+				editor.edit(build => build.replace(rng, text.replace(new RegExp(rx!.find, rx!.flags), normalize(rx?.replace || ''))))
+			break
+		}
+
+		// replace at item level
+		case 'item.re': {
+			if (rx = sedrx(msg.params![0])) {
+				const items = split_to_items(text).map(itm => itm.replace(new RegExp(rx!.find, rx!.flags), normalize(rx?.replace || '')))
+				editor.edit(build => build.replace(rng, join_items(items)))
 			}
-		})
-	}
-}
-
-function join(level: Level): void {
-	lreplace(level, replacer)
-
-	function replacer(txt: string): string {
-		let result = ''
-		const lines = txt.split(/[ \t]*\n[ \t]*/)
-		for (let i = 0; i < lines.length - 1; i++) {
-			const n = lines[i].trim().lastIndexOf(' ')
-			result += `${lines[i]}${n > 60 ? ' ' : '\n'}`
+			break
 		}
-		result += lines[lines.length - 1]
-		result = result.replace(/\n{3,}/g, '\n\n')
-		return result
-	}
-}
 
-/** Run replacement on entire or part of document */
-function re(level: Level, regex: string, repl: string): void {
-	lreplace(level, replacer)
-	function replacer(txt: string): string {
-		return sreplace(txt, regex, repl)
-	}
-}
-
-function lists(txt: string, format: 'markdown'|'html'): string {
-	let items = txt.trim().split(/[ \t]*\n[ \t]*(?=(?:[-*]|[a-m]|[0-9]+|(?:M{0,3})(?:CM|CD|D?C{0,3})(?:XC|XL|L?X{0,3})(?:IX|IV|V?I{0,3}))[.): \t][ \t]*)/gmi)
-	if (items.length < 2) return txt
-	if (items[0][0].toLocaleLowerCase() === 'a') {
-		const a = 'a'.charCodeAt(0)
-		for (let i = 1; i < items.length; i++) {
-			if (items[i][0].toLocaleLowerCase() !== String.fromCharCode(a + i))
-				return txt
-		}
-		return list(items, 'letter')
-	} else if (items[0][0] === '1') {
-		for (let i = 0; i < items.length; i++) {
-			const match = items[i].match(/^\d+/)
-			if (!match || match[0] !== (i + 1).toString())
-				return txt
-		}
-		return list(items, 'number')
-	} else if (items[0][0].toLowerCase() === 'i') {
-		for (let i = 0; i < items.length; i++) {
-			const match = items[i].match(/^(.*?)[.): \t]/)
-			if (!match || match[1].toUpperCase() !== roman(i + 1))
-				return txt
-		}
-		return list(items, 'roman')
-	} else {
-		const match = items[0].match(/^[*-●][ ]/)
-		if (match) {
-			for (let i = 1; i < items.length; i++) {
-				if (!items[i].startsWith(match[0]))
-					return txt
+		// replace only in question part
+		case 'question.re': {
+			if (rx = sedrx(msg.params![0])) {
+				const item_parts = split_to_parts(split_to_items(text)).map(itm => {
+					itm.question = itm.question.replace(new RegExp(rx!.find, rx!.flags), normalize(rx?.replace || ''))
+					return itm
+				})
+				editor.edit(build => build.replace(rng, join_items(join_parts(item_parts))))
 			}
-			return list(items, 'bullet')
+			break
+		}
+
+		// replace only in options part
+		case 'options.re': {
+			if (rx = sedrx(msg.params![0])) {
+				const item_parts = split_to_parts(split_to_items(text)).map(itm => {
+					if (itm.options) itm.options = itm.options.replace(new RegExp(rx!.find, rx!.flags), normalize(rx?.replace || ''))
+					return itm
+				})
+				editor.edit(build => build.replace(rng, join_items(join_parts(item_parts))))
+			}
+			break
+		}
+
+		// replace only in answer part
+		case 'answer.re': {
+			if (rx = sedrx(msg.params![0])) {
+				const item_parts = split_to_parts(split_to_items(text)).map(itm => {
+					if (itm.answer) itm.answer = itm.answer.replace(new RegExp(rx!.find, rx!.flags), normalize(rx?.replace || ''))
+					return itm
+				})
+				editor.edit(build => build.replace(rng, join_items(join_parts(item_parts))))
+			}
+			break
+		}
+
+		// cloze each item, if answer is empty copy any existing options, add hard breaks in question and answer
+		case 'cloze': {
+			const items = split_to_parts(split_to_items(text)).map((itm, i) => {
+				const question = hard_break(itm.question)
+				const options = itm.options ? `${itm.options}\n\n` : ''
+				const answer = hard_break(itm.answer?.trim() || '') || (itm.options?.trim() ? `\n${itm.options.trim()}\n\n` : '')
+				return `${question}\n\n${options}{{c${i+1}::${answer}}}`
+			})
+			editor.edit(build => build.replace(rng, join_items(items)))
+			break
+		}
+
+		case 'html': {
+			const md = new MarkdownIt({
+				breaks: false,
+				html: true
+			})
+			md.renderer.rules.paragraph_open = () => ''
+			md.renderer.rules.paragraph_close = (tokens, idx, options, env, self) => {
+				const nx = tokens[idx + 1]?.type
+				return nx === 'paragraph_open' ? '<br><br>' : ''
+			}
+			md.renderer.rules.softbreak = () => ' '
+			const html = md.render(text).replace(/(<\/?(?:div|p|ol|ul|li|hr|blockquote|pre|table|theade|tbody|tfoot|tr|td|th|br|h[1-6]).*?>)\s+/g, '$1')
+			editor.edit(build => build.replace(rng, html))
+			break
+		}
+
+		case 'save': {
+			// keep saved last URI
+			const old_cfg = config.inspect(KEY)?.globalValue as Config || {} as Config
+			cfg = msg.params as Config
+			cfg.last_uri = old_cfg.last_uri
+			await config.update(KEY, cfg, vscode.ConfigurationTarget.Global)
+			break
+		}
+
+		default: {
+			vscode.window.showErrorMessage(`Unknown tool command "${msg.command}"`)
 		}
 	}
-
-	return txt
-
-	function list(items: string[], type: 'number'|'letter'|'roman'|'bullet'): string {
-		if (format === 'markdown') {
-			if (type === 'number') {
-				for (let i = 0; i < items.length; i++)
-					items[i] = items[i].replace(/([ \t]*\n[ \t]*)+/gm, ' ').trim()
-			} else if (type === 'bullet') {
-				for (let i = 0; i < items.length; i++)
-					items[i] = '- ' + items[i].slice(1).replace(/([ \t]*\n[ \t]*)+/gm, ' ').trim()
-			} else {
-				for (let i = 0; i < items.length; i++)
-					items[i] = '- ' + items[i].replace(/([ \t]*\n[ \t]*)+/gm, ' ').trim()
-			}
-			return items.join('\n')
-		} else {
-			if (type === 'number') {
-				for (let i = 0; i < items.length; i++)
-					items[i] = '<li>' + items[i]
-						.replace(/^\d+[.:) ]/, '')
-						.replace(/([ \t]*\n[ \t]*)+/gm, ' ')
-						.trim() +
-						'</li>'
-			} else if (type === 'bullet') {
-				for (let i = 0; i < items.length; i++)
-					items[i] = '<li>' + items[i]
-						.slice(1)
-						.replace(/([ \t]*\n[ \t]*)+/gm, ' ')
-						.trim() +
-						'</li>'
-			} else {
-				for (let i = 0; i < items.length; i++)
-					items[i] = '<li>' + items[i]
-						.replace(/([ \t]*\n[ \t]*)+/gm, ' ')
-						.trim() +
-						'</li>'
-			}
-			const t = type === 'number' ? 'ol' : 'ul'
-			return `<${t}>${items.join('')}</${t}>`
-		}
-	}
-
-	function roman(n: number): string {
-		let rn = ''
-		for (const [value, symbol] of ROMAN_MAP) {
-			while (n >= value) {
-				rn += symbol
-				n -= value
-			}
-		}
-	
-		return rn
-	}
 }
 
-
-/** Load configuration (regexes etc) from persistent storage and set up panel HTML */
-function load_panel(): string {
-	const cfg = context.globalState.get(KEY) as Config || { document: [], item: [], question: [], text: [], options: [], answer: [] }
-	const uri = panel.webview.asWebviewUri(
-		vscode.Uri.joinPath(context.extensionUri, 'out', 'webview.js')
-	)
-
-	const html = `
-			<html>
-			<head>
-			<script>const vscode = acquireVsCodeApi()</script>
-			<script src="${uri}"></script>
-			</head>
-			<body>
-				<div id="input">
-					<hr style="margin-top: 20px;">
-					<b>DOCUMENT</b>
-					${level('document', cfg.document)}
-					<hr style="margin-top: 30px;">
-					<b>ITEM</b>
-					${level('item', cfg.item)}
-					<hr style="margin-top: 30px;">
-					<b>QUESTION</b>
-					${level('question', cfg.question)}
-					<hr style="margin-top: 30px;">
-					<b>TEXT</b>
-					${level('text', cfg.text)}
-					<hr style="margin-top: 30px;">
-					<b>OPTIONS</b>
-					${level('options', cfg.options)}
-					<button onclick="lists(this, vscode)">Parse lists</button>
-					<hr style="margin-top: 30px;">
-					<b>ANSWER</b>
-					${level('answer', cfg.answer)}
-					<hr style="margin-top: 30px;">
-					<button onclick="save(vscode)">Save</button>
-					<button onclick="vscode.postMessage({command: 'cloze'})">Cloze</button>
-				</div>
-			</body>
-			</html>
-	`
-
-	vscode.window.showInformationMessage(html)
-	return html
-
-	function level(section: Level, items: Regex[]): string {
-		let result = `<table id="${section}" style="width: 100%;padding: 0px; margin: 0px;">`
-		for (const { title, regex, replacement } of items)
-			result += `<tr>${tr(title, regex, replacement)}</tr>`
-		result += `<tr>
-			<td colspan="2" style="padding: 0px; margin: 0px;">
-				<button onclick="join_lines(this, vscode)">Join lines</button>
-				<button onclick="add_row(this)">Add row</button>
-			</td>
-			</tr>
-			</table>`
-		return result
-	}
-}
-
-/** Persist config */
-function save(data: Config): void {
-	context.globalState.update(KEY, data)
-}
-
-/** Cloze the supplied string to Anki HTML. */
-function cloze(): void {
-	const editor = vscode.window.visibleTextEditors[0]
-	const doc = editor?.document
-	if (doc) {
-		const txt = doc.getText()
-		const rng = new vscode.Range(doc.positionAt(0), doc.positionAt(txt.length))
-		const items = split_doc(txt)
-		editor.edit(build => {
-			for (let i = 0; i < items.length; i++) {
-				items[i].item = ''
-				if (items[i].text || items[i].options) {
-					if (items[i].text)
-						items[i].item += `${hardbreak(items[i].text!)}`
-					if (items[i].options) {
-						if (items[i].item.length) items[i].item += '<br><br>'
-						items[i].item += lists(items[i]!.options!, 'html')
-					}
-						
-				} else {
-					items[i].item = hardbreak(items[i].question)
-				}
-
-				items[i].item += `<br>{{c${i + 1}::`
-				if (items[i].answer) {
-					items[i].item += `${hardbreak(items[i].answer!)}`
-				} else {
-					if (items[i].options) {
-						items[i].item += `${lists(items[i].options!, 'html')}`
-					} else {
-						items[i].item += '<br><br>'
-					}
-				}
-				items[i].item += '}}'
-			}
-			build.replace(
-				rng,
-				items.map(item => item.item.trim())
-				.join('<hr>')
-				.replace(/\n/g, '<br>')
-			)
-		})
-	}
-
-}
-
-function hardbreak(str: string): string {
-	return str.trim().replace(/[ \t]*\n/, '<br>')
-}
 
 /** Called when extension is deactivated */
 export function deactivate() {

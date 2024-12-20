@@ -1,110 +1,202 @@
-import { Config, Level, VsCodeApi } from "./constants"
+import * as vscode from 'vscode'
+import { RxItem, Config, ITEM_SEP, OPTIONS_SEP, ANSWER_SEP, Message } from './constants.js'
+import { listener } from './extension.js'
+import { sedrx as sedrx_ } from './sedrx.js'
 
-/** Duplicate from extension.ts - can't include correctly */
-export function tr(title: string, regex: string, replacement: string): string {
-	//title = title.replace(/^<.*?>(.*?)<\/button>$/, '$1')
+// neccessary as transpilation mangles the imported name which will mess up the .toString() injection
+const sedrx = sedrx_
+
+function rx_item(level: string, rx: RxItem): string {
 	return `
-	<td style="width: 1px;white-space: nowrap;padding: 0px;margin: 0px;">
-		<button onclick="post_re(this, vscode)" style="width: 100%; box-sizing: border-box;">${title}</button>
-	</td>
-	<td style="display: flex;padding: 0px; margin: 0px;">
-		<input type="text" style="flex-grow: 2;flex-shrink: 1;margin-right: 10px;box-sizing: border-box;font-family: monospace;font-size: 12px;" value="${regex}">
-		<input type="text" style="flex-grow: 1;flex-shrink: 2;margin-right: 10px;box-sizing: border-box;font-family: monospace; font-size: 12px;" value="${replacement}">
-		<button onclick="del_row(this)">Delete</button>
-	</td>
-	`
+	<div class="row">
+		<input class="label" value="${rx.label}">
+		<input class="rx" value="${rx.rx}" oninput="validate_rx(this)">
+		<button class="run" onclick="vscode.postMessage({command: '${level}.re', params: [this.previousElementSibling.value]})">Run</button>
+		<button class="delete" onclick="this.parentElement.remove()">Del</button>
+	</div>
+`
 }
 
-export async function add_row(element: HTMLElement) {
-	const dialog = document.createElement('dialog')
-	dialog.innerHTML = `
-		Title: <input type="text">
-		<button onclick="this.parentElement.close(this.previousElementSibling.value)">Ok</button>
-		`
-	document.body.appendChild(dialog)
-	dialog.showModal()
-	const input = dialog.querySelector('input')
-	input?.addEventListener('keypress', (evt) => {
-		if (evt.key === 'Enter') dialog.close(input.value)
-	})
+function add_rx(parent: HTMLElement, rx: RxItem, level: string) {
+	const div = document.createElement('div')
+	parent.appendChild(div)
+	div.outerHTML = rx_item(level, rx)
+}
 
-	dialog.addEventListener('close', () => {
-		const title = dialog.returnValue
-		dialog.remove()
+function validate_rx(input: HTMLInputElement) {
+	try {
+		const rx = sedrx(input.value)
+		if (!rx || !rx.find || rx.replace === null)
+			throw new Error('Invalid regex')
+		new RegExp(rx.find, rx.flags)
+		input.style.borderColor = ''
+	} catch (e) {
+		input.style.borderColor = 'red'
+	}
+}
 
-		while (element && element.nodeName.toLowerCase() !== 'table')
-			element = element.parentElement as HTMLElement
-		const table = element as HTMLTableElement
-		try {
-			const row = table.insertRow(table.rows.length - 1)
-			row.innerHTML = tr(title, '', '')
-		} catch (e) {
-			document.write(e as string)
+function save() {
+	function get_vals(level: string): RxItem[] {
+		const labels = document.querySelectorAll(`div#${level}-rx input.label`)
+		const rxs = document.querySelectorAll(`div#${level}-rx input.rx`)
+		const res = []
+		for (let i = 0; i < labels.length; i++) {
+			res.push({
+				label: (labels[i] as HTMLInputElement).value,
+				rx: (rxs[i] as HTMLInputElement).value
+			} as RxItem)
 		}
-	})
-}
-
-export function del_row(element: HTMLElement) {
-	let i
-	while (element && element.nodeName.toLowerCase() !== 'table') {
-		if (element.nodeName.toLowerCase() === 'tr')
-			i = (element as HTMLTableRowElement).rowIndex
-		element = element.parentElement as HTMLElement
+		return res
 	}
-	(element as HTMLTableElement).deleteRow(i!)
+	const params = {
+		document: get_vals('document'),
+		item: get_vals('item'),
+		question: get_vals('question'),
+		options: get_vals('options'),
+		answer: get_vals('answer')
+	}
+	// @ts-ignore
+	vscode.postMessage({command: 'save', params: params})
 }
 
-export function post_re(element: HTMLElement, vscode: VsCodeApi) {
-	while (element && element.nodeName.toLowerCase() !== 'tr')
-		element = element.parentElement as HTMLElement
-	const elements = element.querySelectorAll('input')
-	const input = [(elements[0] as HTMLInputElement).value, (elements[1] as HTMLInputElement).value]
-	while (element && element.nodeName.toLowerCase() !== 'table')
-		element = element.parentElement as HTMLElement
-	const cmd = `${element.id}.re`
-	vscode.postMessage({
-		command: cmd,
-		params: input
-	})
-}
 
-export function join_lines(element: HTMLElement, vscode: VsCodeApi) {
-	while (element && element.nodeName.toLowerCase() !== 'table')
-		element = element.parentElement as HTMLElement
-	const cmd = `${element.id}.join`
-	vscode.postMessage({command: cmd})
-}
+export class PdfToClozePanelProvider implements vscode.WebviewViewProvider {
+	private _view?: vscode.WebviewView;
+	html: string = ''
 
-export function lists(element: HTMLElement, vscode: VsCodeApi) {
-	while (element && element.nodeName.toLowerCase() !== 'table')
-		element = element.previousElementSibling as HTMLElement
-	const cmd = `${element.id}.lists`
-	vscode.postMessage({command: cmd})
-}
-
-export function save(vscode: VsCodeApi) {
-	const data: Config = {
-		document: [],
-		item: [],
-		question: [],
-		text: [],
-		options: [],
-		answer: []
+    constructor(private readonly extensionUri: vscode.Uri, readonly cfg: Config) {
+		this.html = `
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                <style>
+						div.section {
+							margin: 20px 0px 20px 0px;
+							background-color: var(--vscode-editor-background);
+							border: 1px solid var(--vscode-panel-border);
+							border-radius: 3px;
+							padding: 5px;
+						}
+						span.label {
+							font-weight: bold;
+							font-size: 1.2em;
+						}
+						div.row {
+							display: grid;
+							grid-template-columns: 1fr 40px 40px;
+							grid-template-rows: auto;
+							gap: 10px;
+  							align-items: center;
+							margin: 10px 0px 10px 0px;
+							padding-bottom: 10px;
+							border-bottom: 1px solid var(--vscode-panelSection-dropBackground)
+						}
+						div.row > input:nth-child(1) {
+							grid-column: 1;
+							grid-row: 1;
+						}
+						div.row > input:nth-child(2) {
+							grid-column: 1 / 4;
+							grid-row: 2;
+						}
+						div.row > input:nth-child(3) {
+							grid-column: 3;
+							grid-row: 1;
+						}
+						div.row > input:nth-child(4) {
+							grid-column: 4;
+							grid-row: 1;
+						}
+						input {
+							background-color: var(--vscode-input-background);
+							border: 1px solid var(--vscode-input-border);
+							color: var(--vscode-input-foreground);
+							font-family: var(--vscode-font-family);
+							font-size: var(--vscode-font-size);
+							font-weight: var(--vscode-font-weight);
+							padding: 2px;
+							border-radius: 3px;
+						}
+						button {
+							background-color: var(--vscode-editor-background);
+							color: var(--vscode-input-foreground);
+							border: none; /*1px solid var(--vscode-input-border);*/
+							font-family: var(--vscode-font-family);
+							font-size: var(--vscode-font-size);
+							font-weight: var(--vscode-font-weight);
+							padding-bottom: 3px;
+							padding-left: 5px;
+							padding-right: 5px;
+							border-radius: 3px;
+						}
+						button:hover {
+							background-color: var(--vscode-input-background);
+						}
+						input:focus, button:focus {
+							outline: none;
+							border-color: var(--vscode-inputOption-activeBorder);
+							border-width: 1px;
+							border-style: solid;
+						}
+                </style>
+                <script>
+                    const vscode = acquireVsCodeApi();
+					${rx_item.toString()}
+                    ${add_rx.toString()}
+                    ${sedrx.toString()}
+                    ${validate_rx.toString()}
+                    ${save.toString()}
+					const empty_rx = {label: '', rx: ''}
+                </script>
+            </head>
+            <body>
+				<b>RE format</b>: <code>/^\s+(\S+)/[$1]:/gm</code> (optional leading s, arbitrary delimiter, flags: gmiusy)<br>
+				<b>Separators</b>: item ${ITEM_SEP.slice(0, 3)}, options ${OPTIONS_SEP.slice(0, 3)}, answer ${ANSWER_SEP.slice(0, 3)}
+				<div class="section">
+					<span class="label">DOCUMENT</span>
+					<div id="document-rx" class="level">${cfg.document?.map(rx => rx_item('document', rx)).join('') || ''}</div>
+					<button class="add" onclick="add_rx(this.previousElementSibling, empty_rx, 'document')">Add</button>
+				</div>
+				<div class="section">
+					<span class="label">ITEM</span>
+					<div id="item-rx" class="level">${cfg.item?.map(rx => rx_item('item', rx)).join('') || ''}</div>
+					<button class="add" onclick="add_rx(this.previousElementSibling, empty_rx, 'item')">Add</button>
+				</div>
+				<div class="section">
+					<span class="label">QUESTION</span>
+					<div id="question-rx" class="level">${cfg.question?.map(rx => rx_item('question', rx)).join('') || ''}</div>
+					<button class="add" onclick="add_rx(this.previousElementSibling, empty_rx, 'question')">Add</button>
+				</div>
+				<div class="section">
+					<span class="label">OPTIONS</span>
+					<div id="options-rx" class="level">${cfg.options?.map(rx => rx_item('options', rx)).join('') || ''}</div>
+					<button class="add" onclick="add_rx(this.previousElementSibling, empty_rx, 'options')">Add</button>
+				</div>
+				<div class="section">
+					<span class="label">ANSWER</span>
+					<div id="answer-rx" class="level">${cfg.answer?.map(rx => rx_item('answer', rx)).join('') || ''}</div>
+					<button class="add" onclick="add_rx(this.previousElementSibling, empty_rx, 'answer')">Add</button>
+				</div>
+				<button class="save" onclick="save()">Save</button>
+				<button class="cloze" onclick="vscode.postMessage({command: 'cloze'})">Cloze</button>
+				<button class="html" onclick="vscode.postMessage({command: 'html'})">HTML</button>
+            </body>
+            </html>
+        `
 	}
 
-	for (const section of Object.keys(data)) {
-		for (const row of document.querySelectorAll(`table#${section} tr`)) {
-			const input = row.querySelectorAll('input')
-			data[section as Level].push({
-				title: row.children[0].firstElementChild!.innerHTML,
-				regex: input[0]?.value || '',
-				replacement: input[1]?.value || ''
-			})
-		}	
-	}
-	
-	vscode.postMessage({
-		command: 'save',
-		params: [data]
-	})
+    resolveWebviewView(
+        webviewView: vscode.WebviewView,
+        context: vscode.WebviewViewResolveContext,
+        _token: vscode.CancellationToken,
+    ) {
+        this._view = webviewView;
+        webviewView.webview.options = {
+            enableScripts: true,
+        }
+		webviewView.webview.html ||= this.html
+		const listen = webviewView.webview.onDidReceiveMessage(msg => listener(msg))
+		webviewView.onDidDispose(() => listen.dispose())
+    }
 }

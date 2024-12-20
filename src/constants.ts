@@ -1,31 +1,33 @@
 import * as vscode from 'vscode'
 
-export interface VsCodeApi {
+export declare type VsCodeApi = {
     postMessage(message: any): void
     setState(state: any): void
     getState(): any
 }
 
-export declare type Level = 'document'|'item'|'question'|'text'|'options'|'answer'
-
-export declare type Regex = {title: string, regex: string, replacement: string}
-export interface Config {
-	document: Regex[]
-	item: Regex[]
-	question: Regex[]
-	text: Regex[]
-	options: Regex[]
-	answer: Regex[]
-	uri?: vscode.Uri
+export declare type Level = 'document'|'item'|'question'|'options'|'answer'
+export declare type RxItem = {label: string, rx: string}
+export declare type Config = {
+	document?: RxItem[]
+	item?: RxItem[]
+	question?: RxItem[]
+	options?: RxItem[]
+	answer?: RxItem[]
+	last_uri?: vscode.Uri
 }
 
-export interface Message {
+export declare type Message = {
 	command: string
 	params?: any[]
 }
 
-export const ROMAN_MAP: [number, string][] = [
-	[1000, "M"], [900, "CM"], [500, "D"], [400, "CD"], [100, "C"], [90, "XC"],
-	[50, "L"], [40, "XL"], [10, "X"], [9, "IX"], [5, "V"], [4, "IV"], [1, "I"]
-]
 
+/** Global state storage key */
+export const KEY = 'pdftocloze'
+/** Separator between items/question-options-answers */
+export const ITEM_SEP = '************************************************'
+/** Separator between question text and question options */
+export const OPTIONS_SEP = '-------------------------------------------------'
+/** Separator between the question (and any options) and answer */
+export const ANSWER_SEP = '_________________________________________________'
